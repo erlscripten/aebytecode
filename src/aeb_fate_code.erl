@@ -243,12 +243,22 @@ safe_sanity_check(IsLast, Op, Args) ->
 %% 01 : argN
 %% 10 : varN
 %% 11 : immediate
-
 serialize_code([{_,_}|_] = List ) ->
     %% Take out the full argument list.
     {Args, Rest} = lists:splitwith(fun({_, _}) -> true; (_) -> false end, List),
     %% Create the appropriate number of modifier bytes.
-    Mods = << <<(modifier_bits(Type, X)):2>> || {Type, X} <- pad_args(lists:reverse(Args)) >>,
+    BuildMods =
+        fun BuildMods([], Acc) -> Acc;
+            BuildMods([{Type, X}|T], Acc) ->
+                BuildMods(T, (Acc bsl 2) bor (modifier_bits(Type, X) band 2#11))
+        end,
+
+    Padded = pad_args(lists:reverse(Args)),
+    ModsUnpadded = BuildMods(pad_args(lists:reverse(Args)), 0),
+    Mods = case length(Padded) of
+               4 -> <<ModsUnpadded:8>>;
+               8 -> <<ModsUnpadded:16>>
+           end,
     case Mods of
         <<M1:8, M2:8>> ->
             [M1, M2 | [serialize_data(Type, Arg) || {Type, Arg} <- Args, Type =/= stack]] ++
@@ -390,7 +400,11 @@ deserialize_op(Op, Rest, Code) ->
             {Rest1, [list_to_tuple([OpName|Args])|Code]}
     end.
 
-deserialize_n_args(N, <<M3:2, M2:2, M1:2, M0:2, Rest/binary>>) when N =< 4 ->
+deserialize_n_args(N, <<Bin:8, Rest/binary>>) when N =< 4 ->
+    M3 = (Bin band 2#11000000) bsr 6,
+    M2 = (Bin band 2#00110000) bsr 4,
+    M1 = (Bin band 2#00001100) bsr 2,
+    M0 = (Bin band 2#00000011),
     {ArgMods, Zeros} = lists:split(N, [M0, M1, M2, M3]),
     assert_zero(Zeros),
     lists:mapfoldl(fun(M, Acc) ->
@@ -402,8 +416,17 @@ deserialize_n_args(N, <<M3:2, M2:2, M1:2, M0:2, Rest/binary>>) when N =< 4 ->
                                    {{Modifier, Arg}, Acc2}
                            end
                    end, Rest, ArgMods);
-deserialize_n_args(N, <<M7:2, M6:2, M5:2, M4:2, M3:2, M2:2, M1:2, M0:2,
+deserialize_n_args(N, <<Bin:16,
                         Rest/binary>>) when N =< 8 ->
+
+    M7 = (Bin band 2#1100000000000000) bsr 14,
+    M6 = (Bin band 2#0011000000000000) bsr 12,
+    M5 = (Bin band 2#0000110000000000) bsr 10,
+    M4 = (Bin band 2#0000001100000000) bsr 8,
+    M3 = (Bin band 2#0000000011000000) bsr 6,
+    M2 = (Bin band 2#0000000000110000) bsr 4,
+    M1 = (Bin band 2#0000000000001100) bsr 2,
+    M0 = (Bin band 2#0000000000000011),
     {ArgMods, Zeros} = lists:split(N, [M0, M1, M2, M3, M4, M5, M6, M7]),
     assert_zero(Zeros),
     lists:mapfoldl(fun(M, Acc) ->

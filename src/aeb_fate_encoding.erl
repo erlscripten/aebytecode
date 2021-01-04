@@ -145,7 +145,8 @@ serialize(String) when ?IS_FATE_STRING(String),
                        ?FATE_STRING_SIZE(String) < ?SHORT_STRING_SIZE ->
     Size = ?FATE_STRING_SIZE(String),
     Bytes = ?FATE_STRING_VALUE(String),
-    <<Size:6, ?SHORT_STRING:2, Bytes/binary>>;
+    Bin = ((Size bsl 2) band 2#11111100) bor (?SHORT_STRING band 2#00000011),
+    <<Bin:8, Bytes/binary>>;
 serialize(String) when ?IS_FATE_STRING(String),
                        ?FATE_STRING_SIZE(String) > 0,
                        ?FATE_STRING_SIZE(String) >= ?SHORT_STRING_SIZE ->
@@ -170,7 +171,8 @@ serialize(?FATE_TUPLE(T)) when size(T) > 0 ->
     L = tuple_to_list(T),
     Rest = << <<(serialize(E))/binary>> || E <- L >>,
     if S < ?SHORT_TUPLE_SIZE ->
-            <<S:4, ?SHORT_TUPLE:4, Rest/binary>>;
+            Bin = ((S bsl 4) band 2#11110000) bor (?SHORT_TUPLE band 2#00001111),
+            <<Bin:8, Rest/binary>>;
        true ->
             Size = rlp_encode_int(S - ?SHORT_TUPLE_SIZE),
             <<?LONG_TUPLE:8, Size/binary, Rest/binary>>
@@ -180,7 +182,8 @@ serialize(L) when ?IS_FATE_LIST(L) ->
     S = length(List),
     Rest = << <<(serialize(El))/binary>> || El <- List >>,
     if S < ?SHORT_LIST_SIZE ->
-            <<S:4, ?SHORT_LIST:4, Rest/binary>>;
+            Bin = ((S bsl 4) band 2#11110000) bor (?SHORT_LIST band 2#00001111),
+            <<Bin:8, Rest/binary>>;
        true ->
             Val = rlp_encode_int(S - ?SHORT_LIST_SIZE),
             <<?LONG_LIST, Val/binary, Rest/binary>>
@@ -325,7 +328,12 @@ serialize_integer(I) when ?IS_FATE_INTEGER(I) ->
                true  -> ?NEG_SIGN;
                false -> ?POS_SIGN
            end,
-    if Abs < ?SMALL_INT_SIZE -> <<Sign:1, Abs:6, ?SMALL_INT:1>>;
+    if Abs < ?SMALL_INT_SIZE ->
+            Bin =
+                ((Sign bsl 7) band 2#10000000) bor
+                ((Abs  bsl 1) band 2#01111110) bor
+                (?SMALL_INT   band 2#00000001),
+            <<Bin:8>>;
        Sign =:= ?NEG_SIGN -> <<?NEG_BIG_INT,
                                (rlp_encode_int(Abs - ?SMALL_INT_SIZE))/binary>>;
        Sign =:= ?POS_SIGN -> <<?POS_BIG_INT,
@@ -346,9 +354,15 @@ deserialize(B) ->
 
 deserialize_one(B) -> deserialize2(B).
 
-deserialize2(<<?POS_SIGN:1, I:6, ?SMALL_INT:1, Rest/binary>>) ->
+deserialize2(<<Bin:8, Rest/binary>>)
+  when (Bin band 2#10000000) bsr 7 =:= ?POS_SIGN,
+       Bin band 1 =:= ?SMALL_INT ->
+    I = Bin band 2#01111110 bsr 1,
     {?MAKE_FATE_INTEGER(I), Rest};
-deserialize2(<<?NEG_SIGN:1, I:6, ?SMALL_INT:1, Rest/binary>>) ->
+deserialize2(<<Bin:8, Rest/binary>>)
+  when (Bin band 2#10000000) bsr 7 =:= ?NEG_SIGN,
+       Bin band 1 =:= ?SMALL_INT ->
+    I = Bin band 2#01111110 bsr 1,
     if I =/= 0  ->  {?MAKE_FATE_INTEGER(-I), Rest};
        I == 0 -> error({illegal_sign, I})
     end;
@@ -377,7 +391,8 @@ deserialize2(<<?LONG_STRING, Rest/binary>>) ->
     String = binary:part(Rest2, 0, Size),
     Rest3 = binary:part(Rest2, byte_size(Rest2), - (byte_size(Rest2) - Size)),
     {?MAKE_FATE_STRING(String), Rest3};
-deserialize2(<<S:6, ?SHORT_STRING:2, Rest/binary>>) ->
+deserialize2(<<Bin:8, Rest/binary>>) when Bin band 2#00000011 =:= ?SHORT_STRING ->
+    S = (Bin band 2#11111100) bsr 2,
     String = binary:part(Rest, 0, S),
     Rest2 = binary:part(Rest, byte_size(Rest), - (byte_size(Rest) - S)),
     {?MAKE_FATE_STRING(String), Rest2};
@@ -409,7 +424,8 @@ deserialize2(<<?LONG_TUPLE, Rest/binary>>) ->
     N = Size + ?SHORT_TUPLE_SIZE,
     {List, Rest2} = deserialize_elements(N, Rest1),
     {?FATE_TUPLE(list_to_tuple(List)), Rest2};
-deserialize2(<<S:4, ?SHORT_TUPLE:4, Rest/binary>>) ->
+deserialize2(<<Bin:8, Rest/binary>>) when Bin band 2#00001111 =:= ?SHORT_TUPLE ->
+    S = (Bin band 2#11110000) bsr 4,
     {List, Rest1} = deserialize_elements(S, Rest),
     {?FATE_TUPLE(list_to_tuple(List)), Rest1};
 deserialize2(<<?LONG_LIST, Rest/binary>>) ->
@@ -417,7 +433,8 @@ deserialize2(<<?LONG_LIST, Rest/binary>>) ->
     Length = Size + ?SHORT_LIST_SIZE,
     {List, Rest2} = deserialize_elements(Length, Rest1),
     {?MAKE_FATE_LIST(List), Rest2};
-deserialize2(<<S:4, ?SHORT_LIST:4, Rest/binary>>) ->
+deserialize2(<<Bin:8, Rest/binary>>) when Bin band 2#00001111 =:= ?SHORT_LIST ->
+    S = (Bin band 2#11110000) bsr 4,
     {List, Rest1} = deserialize_elements(S, Rest),
     {?MAKE_FATE_LIST(List), Rest1};
 deserialize2(<<?MAP, Rest/binary>>) ->
